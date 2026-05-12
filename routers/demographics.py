@@ -1,9 +1,7 @@
 # pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends
 # pyrefly: ignore [missing-import]
-from sqlmodel import Session, select, func
-# pyrefly: ignore [missing-import]
-from sqlalchemy import case, or_
+from sqlmodel import Session, select, func, case, or_
 from core.database import get_session
 from core.models import Election, Constituency, Candidate
 from core.logic import get_alliance

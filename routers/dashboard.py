@@ -2,8 +2,6 @@
 from fastapi import APIRouter, Depends
 # pyrefly: ignore [missing-import]
 from sqlmodel import Session, select, func
-# pyrefly: ignore [missing-import]
-from sqlalchemy.orm import aliased
 from core.database import get_session
 from core.models import Election, Constituency, Candidate
 from core.logic import get_alliance
@@ -12,13 +10,13 @@ router = APIRouter(prefix="/api/v1/dashboard", tags=["dashboard"])
 
 @router.get("/overview")
 def get_overview_stats(session: Session = Depends(get_session)):
-    # Use count directly instead of fetching all records
-    total_elections_count = session.exec(select(func.count(Election.year))).one()
+    total_elections = session.exec(select(Election)).all()
+    # Calculate total records (candidates) for overview
     total_candidates = session.exec(select(func.count(Candidate.id))).one()
     
     return {
         "data": {
-            "elections_count": total_elections_count,
+            "elections_count": len(total_elections),
             "last_updated": "May 2026",
             "total_records": total_candidates
         }
@@ -26,14 +24,15 @@ def get_overview_stats(session: Session = Depends(get_session)):
 
 @router.get("/turnout-history")
 def get_turnout_history(session: Session = Depends(get_session)):
-    # Fetch only necessary columns
-    elections = session.exec(select(Election.year, Election.total_electorate, Election.total_votes_polled).order_by(Election.year)).all()
+    # Calculate turnout history from database
+    elections = session.exec(select(Election).order_by(Election.year)).all()
     data = []
-    for year, electorate, polled in elections:
-        turnout = (polled / electorate * 100) if electorate and polled else 0
+    for e in elections:
+        # Fallback values if data is missing, but try to calculate
+        turnout = (e.total_votes_polled / e.total_electorate * 100) if e.total_electorate and e.total_votes_polled else 0
         data.append({
-            "year": year, 
-            "turnout": round(turnout, 2) if turnout > 0 else (74.06 if year == 2021 else 77.3)
+            "year": e.year, 
+            "turnout": round(turnout, 2) if turnout > 0 else (74.06 if e.year == 2021 else 77.3)
         })
     return {"data": data}
 
@@ -41,27 +40,34 @@ def get_turnout_history(session: Session = Depends(get_session)):
 def get_year_metrics(year: int, session: Session = Depends(get_session)):
     election = session.exec(select(Election).where(Election.year == year)).first()
     
-    total_seats = election.total_constituencies or 140 if election else 140
-    total_votes = election.total_votes_polled or 0 if election else 0
+    if not election:
+        total_seats = 140
+        total_votes = 0
+    else:
+        total_seats = election.total_constituencies or 0
+        total_votes = election.total_votes_polled or 0
 
     alliance_counts = {"LDF": 0, "UDF": 0, "NDA": 0, "OTHERS": 0}
     
-    # Only fetch winners (rank 1)
     statement = (
-        select(Candidate.party, Candidate.name, Constituency.constituency_name)
+        select(Candidate.party, Candidate.name, Constituency.constituency_name, Candidate.votes)
         .join(Constituency, Candidate.constituency_id == Constituency.id)
-        .where(Constituency.election_year == year, Candidate.rank == 1)
+        .where(Constituency.election_year == year)
+        .order_by(Constituency.constituency_name, Candidate.votes.desc())
     )
-    winners = session.exec(statement).all()
+    all_results = session.exec(statement).all()
     
-    for party, c_name, a_name in winners:
-        alliance = get_alliance(party, year, c_name, a_name)
-        if alliance in alliance_counts:
+    processed_areas = set()
+    total_winners_found = 0
+    
+    for party, c_name, a_name, v_count in all_results:
+        if a_name not in processed_areas:
+            alliance = get_alliance(party, year, c_name, a_name)
             alliance_counts[alliance] += 1
-        else:
-            alliance_counts["OTHERS"] += 1
+            processed_areas.add(a_name)
+            total_winners_found += 1
     
-    winning_alliance = max(alliance_counts, key=alliance_counts.get) if winners else "N/A"
+    winning_alliance = max(alliance_counts, key=alliance_counts.get) if total_winners_found > 0 else "N/A"
     
     return {
         "data": {
@@ -71,44 +77,43 @@ def get_year_metrics(year: int, session: Session = Depends(get_session)):
             "winning_alliance": winning_alliance,
             "alliance_seats": alliance_counts,
             "voter_turnout": "74.06%" if year == 2021 else "77.35%",
+            "debug_top_winners": [list(r) for r in all_results[:10]] 
         },
         "error": None
     }
 
 @router.get("/biggest-wins/{year}")
 def get_biggest_wins(year: int, session: Session = Depends(get_session)):
-    # Use a join to get winner and runner-up margins in one pass
-    Winner = aliased(Candidate)
-    RunnerUp = aliased(Candidate)
-    
     statement = (
-        select(
-            Constituency.constituency_name,
-            Winner.name,
-            Winner.party,
-            Winner.votes,
-            RunnerUp.votes.label("runner_votes")
-        )
-        .join(Winner, (Constituency.id == Winner.constituency_id) & (Winner.rank == 1))
-        .outerjoin(RunnerUp, (Constituency.id == RunnerUp.constituency_id) & (RunnerUp.rank == 2))
+        select(Constituency.constituency_name, Candidate.name, Candidate.party, Candidate.votes)
+        .join(Candidate, Constituency.id == Candidate.constituency_id)
         .where(Constituency.election_year == year)
+        .order_by(Constituency.constituency_name, Candidate.votes.desc())
     )
-    results = session.exec(statement).all()
+    all_results = session.exec(statement).all()
     
+    area_candidates = {}
+    for a_name, c_name, party, votes in all_results:
+        if a_name not in area_candidates:
+            area_candidates[a_name] = []
+        area_candidates[a_name].append({"name": c_name, "party": party, "votes": votes or 0})
+        
     wins = []
-    for area, name, party, votes, r_votes in results:
-        margin = votes - (r_votes or 0)
-        wins.append({
-            "area": area,
-            "winner": name,
-            "party": party,
-            "margin": margin,
-            "votes": votes
-        })
+    for a_name, candidates in area_candidates.items():
+        if len(candidates) >= 2:
+            winner = candidates[0]
+            runner_up = candidates[1]
+            margin = winner["votes"] - runner_up["votes"]
+            wins.append({
+                "area": a_name,
+                "winner": winner["name"],
+                "party": winner["party"],
+                "margin": margin,
+                "votes": winner["votes"]
+            })
             
     wins.sort(key=lambda x: x["margin"], reverse=True)
     return {"data": wins, "error": None}
-
 
 @router.get("/switched-seats")
 def get_switched_seats(session: Session = Depends(get_session)):

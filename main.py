@@ -9,6 +9,7 @@ app = FastAPI(title="Kerala Election Comparison System API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://keralaelectioncomparison.vercel.app",
         "https://election-comparison-frontend.vercel.app",
         "http://localhost:3000",
         "http://localhost:3001",
