@@ -6,6 +6,7 @@ from sqlmodel import Session, select
 from core.database import get_session
 from core.models import Candidate, Constituency
 from core.logic import get_alliance
+import time
 
 router = APIRouter(prefix="/api/v1/candidates", tags=["candidates"])
 
@@ -50,6 +51,7 @@ def search_candidates(q: str, session: Session = Depends(get_session)):
 
 @router.get("/{candidate_name}/timeline")
 def get_candidate_timeline(candidate_name: str, session: Session = Depends(get_session)):
+    start_time = time.time()
     # Normalize input for search
     search_term = candidate_name.lower().replace(".", "").strip()
     
@@ -92,8 +94,7 @@ def get_candidate_timeline(candidate_name: str, session: Session = Depends(get_s
             "vote_percentage": cand.vote_percentage,
             "alliance": get_alliance(cand.party, const.election_year, cand.name, const.constituency_name)
         })
-    
-    # Calculate career stats in backend for frontend efficiency
+        # Calculate career stats in backend for frontend efficiency
     count = len(timeline)
     summary = {
         "elections": count,
@@ -103,7 +104,12 @@ def get_candidate_timeline(candidate_name: str, session: Session = Depends(get_s
         "status": "Active" if timeline and timeline[0]["year"] >= 2021 else "Retired"
     }
     
-    return {"data": timeline, "summary": summary}
+    execution_time = (time.time() - start_time) * 1000
+    return {
+        "data": timeline, 
+        "summary": summary,
+        "computation_time_ms": round(execution_time, 2)
+    }
 
 @router.get("/featured")
 def get_featured_candidates(session: Session = Depends(get_session)):

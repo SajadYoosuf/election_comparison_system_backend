@@ -5,6 +5,7 @@ from sqlmodel import Session, select, func
 from core.database import get_session
 from core.models import Election, Constituency, Candidate
 from core.logic import get_alliance
+import time
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["dashboard"])
 
@@ -38,6 +39,7 @@ def get_turnout_history(session: Session = Depends(get_session)):
 
 @router.get("/year-metrics/{year}")
 def get_year_metrics(year: int, session: Session = Depends(get_session)):
+    start_time = time.time()
     election = session.exec(select(Election).where(Election.year == year)).first()
     
     if not election:
@@ -69,6 +71,7 @@ def get_year_metrics(year: int, session: Session = Depends(get_session)):
     
     winning_alliance = max(alliance_counts, key=alliance_counts.get) if total_winners_found > 0 else "N/A"
     
+    execution_time = (time.time() - start_time) * 1000
     return {
         "data": {
             "year": year,
@@ -79,6 +82,7 @@ def get_year_metrics(year: int, session: Session = Depends(get_session)):
             "voter_turnout": "74.06%" if year == 2021 else "77.35%",
             "debug_top_winners": [list(r) for r in all_results[:10]] 
         },
+        "computation_time_ms": round(execution_time, 2),
         "error": None
     }
 
@@ -117,6 +121,7 @@ def get_biggest_wins(year: int, session: Session = Depends(get_session)):
 
 @router.get("/switched-seats")
 def get_switched_seats(session: Session = Depends(get_session)):
+    start_time = time.time()
     all_years = session.exec(select(Constituency.election_year).distinct().order_by(Constituency.election_year.desc())).all()
     if not all_years: return {"data": [], "error": "No data"}
     
@@ -156,4 +161,9 @@ def get_switched_seats(session: Session = Depends(get_session)):
                     "votes": curr["votes"]
                 })
     
-    return {"data": switches, "meta": {"current": y_current, "previous": y_prev}}
+    execution_time = (time.time() - start_time) * 1000
+    return {
+        "data": switches, 
+        "meta": {"current": y_current, "previous": y_prev},
+        "computation_time_ms": round(execution_time, 2)
+    }

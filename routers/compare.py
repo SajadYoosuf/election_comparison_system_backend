@@ -9,6 +9,7 @@ from core.models import Election, Constituency, Candidate
 from core.logic import get_alliance
 from typing import List, Dict, Optional
 import uuid
+import time
 
 router = APIRouter(prefix="/api/v1/compare", tags=["compare"])
 
@@ -100,6 +101,7 @@ def get_year_metrics(year: int, session: Session):
 
 @router.get("/years")
 def compare_years(y1: int, y2: int, session: Session = Depends(get_session)):
+    start_time = time.time()
     m1 = get_year_metrics(y1, session)
     m2 = get_year_metrics(y2, session)
     if not m1 or not m2: raise HTTPException(status_code=404, detail="Year not found")
@@ -111,7 +113,13 @@ def compare_years(y1: int, y2: int, session: Session = Depends(get_session)):
     mb = {name.upper(): party for party, name in w2}
     switched = sum(1 for name, pb in mb.items() if ma.get(name) and ma.get(name) != pb)
 
-    return {"baseline": m1, "comparison": m2, "switched_seats": switched}
+    execution_time = (time.time() - start_time) * 1000
+    return {
+        "baseline": m1, 
+        "comparison": m2, 
+        "switched_seats": switched,
+        "computation_time_ms": round(execution_time, 2)
+    }
 
 @router.get("/constituencies")
 def compare_constituencies(c1: str, c2: str, session: Session = Depends(get_session)):
@@ -165,10 +173,17 @@ def compare_constituencies(c1: str, c2: str, session: Session = Depends(get_sess
             "nota_avg": round(sum(r.nota_votes or 0 for r in recs[-2:]) / sum(r.votes_polled or 1 for r in recs[-2:]) * 100, 2)
         }
 
+    start_time = time.time()
     d1 = get_const_analytics(c1)
     d2 = get_const_analytics(c2)
     if not d1 or not d2: raise HTTPException(status_code=404, detail="Constituency not found")
-    return {"baseline": d1, "comparison": d2}
+    
+    execution_time = (time.time() - start_time) * 1000
+    return {
+        "baseline": d1, 
+        "comparison": d2,
+        "computation_time_ms": round(execution_time, 2)
+    }
 
 @router.get("/candidates")
 def compare_candidates(name1: str, name2: str, session: Session = Depends(get_session)):
@@ -224,7 +239,14 @@ def compare_candidates(name1: str, name2: str, session: Session = Depends(get_se
             "min_margin": min(margins) if margins else 0
         }
 
+    start_time = time.time()
     b1 = get_cand_career(name1)
     b2 = get_cand_career(name2)
     if not b1 or not b2: raise HTTPException(status_code=404, detail="Candidate not found")
-    return {"baseline": b1, "comparison": b2}
+    
+    execution_time = (time.time() - start_time) * 1000
+    return {
+        "baseline": b1, 
+        "comparison": b2,
+        "computation_time_ms": round(execution_time, 2)
+    }
