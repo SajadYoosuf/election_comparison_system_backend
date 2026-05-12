@@ -19,6 +19,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import time
+# pyrefly: ignore [missing-import]
+from fastapi import Request
+
+@app.middleware("http")
+async def add_process_time_log(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+    print(f"DEBUG: {request.method} {request.url.path} | Completed in {process_time:.4f}s")
+    return response
+
 
 app.include_router(dashboard.router)
 app.include_router(candidates.router)

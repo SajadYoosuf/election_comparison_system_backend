@@ -6,7 +6,6 @@ from sqlmodel import Session, select
 from core.database import get_session
 from core.models import Candidate, Constituency
 from core.logic import get_alliance
-import time
 
 router = APIRouter(prefix="/api/v1/candidates", tags=["candidates"])
 
@@ -51,7 +50,6 @@ def search_candidates(q: str, session: Session = Depends(get_session)):
 
 @router.get("/{candidate_name}/timeline")
 def get_candidate_timeline(candidate_name: str, session: Session = Depends(get_session)):
-    start_time = time.time()
     # Normalize input for search
     search_term = candidate_name.lower().replace(".", "").strip()
     
@@ -104,11 +102,9 @@ def get_candidate_timeline(candidate_name: str, session: Session = Depends(get_s
         "status": "Active" if timeline and timeline[0]["year"] >= 2021 else "Retired"
     }
     
-    execution_time = (time.time() - start_time) * 1000
     return {
         "data": timeline, 
-        "summary": summary,
-        "computation_time_ms": round(execution_time, 2)
+        "summary": summary
     }
 
 @router.get("/featured")
