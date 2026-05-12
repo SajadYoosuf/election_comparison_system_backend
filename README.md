@@ -53,10 +53,7 @@ pip install -r requirements.txt
 ```
 
 ### 3. Environment Setup
-Create a `.env` file in the root:
-```env
-DATABASE_URL=postgresql://user:pass@host:port/dbname
-```
+Configure your environment variables in a `.env` file (not included in version control).
 
 ### 4. Running the API
 ```bash

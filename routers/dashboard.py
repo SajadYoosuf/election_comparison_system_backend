@@ -67,6 +67,17 @@ def get_year_metrics(year: int, session: Session = Depends(get_session)):
             processed_areas.add(a_name)
             total_winners_found += 1
     
+    # Calculate voter turnout dynamically if possible
+    turnout_val = "74.06%" if year == 2021 else "77.35%"
+    if election and election.total_votes_polled and election.total_electorate:
+        turnout_val = f"{round(election.total_votes_polled / election.total_electorate * 100, 2)}%"
+    else:
+        # Fallback to constituency aggregation
+        elec_sum = session.exec(select(func.sum(Constituency.electorate)).where(Constituency.election_year == year)).one() or 0
+        votes_sum = session.exec(select(func.sum(Constituency.votes_polled)).where(Constituency.election_year == year)).one() or 0
+        if elec_sum > 0:
+            turnout_val = f"{round(votes_sum / elec_sum * 100, 2)}%"
+
     winning_alliance = max(alliance_counts, key=alliance_counts.get) if total_winners_found > 0 else "N/A"
     
     return {
@@ -76,7 +87,7 @@ def get_year_metrics(year: int, session: Session = Depends(get_session)):
             "total_votes_polled": total_votes,
             "winning_alliance": winning_alliance,
             "alliance_seats": alliance_counts,
-            "voter_turnout": "74.06%" if year == 2021 else "77.35%",
+            "voter_turnout": turnout_val,
             "debug_top_winners": [list(r) for r in all_results[:10]] 
         },
         "error": None

@@ -14,11 +14,15 @@ def get_alliance(party: str | None, year: int = 2021, candidate_name: str | None
     if "KERALA CONGRESS (M)" in p or "KC(M)" in p or p == "KCM":
         return "LDF" if year >= 2021 else "UDF"
 
+    # 3. RSP (Revolutionary Socialist Party) - Shifted from LDF to UDF in 2014
+    if p == "RSP" or p == "REVOLUTIONARY SOCIALIST PARTY":
+        return "UDF" if year >= 2016 else "LDF"
+
     # LDF Parties (Broad matching for robustness)
     ldf_exact = [
         "CPI(M)", "CPIM", "CPM", "COMMUNIST PARTY OF INDIA (MARXIST)",
         "CPI", "COMMUNIST PARTY OF INDIA", "COMMUNIST PARTY OF INDIA(MARXIST)",
-        "CPI (M)", "CPI ( MARXIST )",
+        "CPI (M)", "CPI ( MARXIST )", "CPI(M)L", "CPIML",
         "NCP", "NATIONALIST CONGRESS PARTY", "N.C.P.",
         "JD(S)", "JDS", "JANATA DAL (SECULAR)", "JANATHA DAL (SECULAR)",
         "LJD", "LOKTANTRIK JANATA DAL", "LOK TANTRIC JANATA DAL",
@@ -28,9 +32,9 @@ def get_alliance(party: str | None, year: int = 2021, candidate_name: str | None
         "RJD", "RASHTRIYA JANATA DAL",
         "KC(B)", "KERALA CONGRESS (B)", "KCB",
         "RSPL", "RSP(LENO)", "RSP(L)",
-        "LDF", "C6", "LDF-IND"
+        "LDF", "C6", "LDF-IND", "LDF INDEPENDENT"
     ]
-    if p in ldf_exact or p.startswith("CPI") or p.startswith("CPM") or "COMMUNIST" in p:
+    if p in ldf_exact or p.startswith("CPI") or p.startswith("CPM") or "COMMUNIST" in p or "MARXIST" in p:
         return "LDF"
 
     # UDF Parties (Broad matching for robustness)
@@ -39,11 +43,11 @@ def get_alliance(party: str | None, year: int = 2021, candidate_name: str | None
         "IUML", "INDIAN UNION MUSLIM LEAGUE", "MUSLIM LEAGUE", "I.U.M.L.", "MUL",
         "KEC", "KERALA CONGRESS", "KERALA CONGRESS (JOSEPH)", "KC(J)", "KEC-J", "KC-J",
         "KC(JACOB)", "KERALA CONGRESS (JACOB)", "KCJ", "K.C.J.",
-        "RSP", "REVOLUTIONARY SOCIALIST PARTY", "R.S.P.",
+        "RSP", "REVOLUTIONARY SOCIALIST PARTY", "R.S.P.", "RSP(B)",
         "CMP", "COMMUNIST MARXIST PARTY", "CMP(J)",
         "RMPI", "REVOLUTIONARY MARXIST PARTY OF INDIA",
         "NCK", "NATIONALIST CONGRESS KERALA",
-        "UDF", "UDF-IND"
+        "UDF", "UDF-IND", "UDF INDEPENDENT"
     ]
     if p in udf_exact or p.startswith("INC") or p.startswith("IUML") or "MUSLIM LEAGUE" in p:
         return "UDF"
