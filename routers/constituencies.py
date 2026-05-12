@@ -10,13 +10,28 @@ router = APIRouter(prefix="/api/v1", tags=["constituencies"])
 
 @router.get("/elections/{year}")
 def get_election_by_year(year: int, session: Session = Depends(get_session)):
-    statement = select(Constituency).where(Constituency.election_year == year)
-    constituencies = session.exec(statement).all()
+    # 1. Fetch all constituencies for the year
+    constituencies = session.exec(select(Constituency).where(Constituency.election_year == year)).all()
+    if not constituencies:
+        return {"data": []}
+        
+    const_ids = [c.id for c in constituencies]
     
+    # 2. Batch fetch all candidates for these constituencies in one query
+    # Sorted by votes desc so that winner is always index 0 in the grouped list
+    candidates_stmt = select(Candidate).where(Candidate.constituency_id.in_(const_ids)).order_by(Candidate.votes.desc())
+    all_candidates = session.exec(candidates_stmt).all()
+    
+    # 3. Group candidates by constituency_id in memory
+    candidates_by_const = {}
+    for cand in all_candidates:
+        if cand.constituency_id not in candidates_by_const:
+            candidates_by_const[cand.constituency_id] = []
+        candidates_by_const[cand.constituency_id].append(cand)
+        
     formatted_data = []
     for const in constituencies:
-        candidates_stmt = select(Candidate).where(Candidate.constituency_id == const.id).order_by(Candidate.votes.desc())
-        candidates = session.exec(candidates_stmt).all()
+        candidates = candidates_by_const.get(const.id, [])
         
         results = []
         for cand in candidates:
@@ -45,33 +60,38 @@ def get_election_by_year(year: int, session: Session = Depends(get_session)):
 
 @router.get("/constituencies/list")
 def list_all_constituencies(session: Session = Depends(get_session)):
-    # Get all unique constituency names and their latest entry
-    # This query finds the latest record for each constituency name
-    statement = select(Constituency).order_by(Constituency.constituency_name, Constituency.election_year.desc())
+    # 1. Get all constituency records, sorted by year descending to pick the latest easily
+    statement = select(Constituency).order_by(Constituency.election_year.desc())
     all_records = session.exec(statement).all()
     
-    unique_consts = {}
+    unique_const_latest = {}
     for const in all_records:
-        # Normalize name to avoid case duplicates
         norm_name = const.constituency_name.strip().upper()
+        if norm_name not in unique_const_latest:
+            unique_const_latest[norm_name] = const
+            
+    # 2. Batch fetch winners (rank=1) for all these latest constituency IDs
+    latest_ids = [c.id for c in unique_const_latest.values()]
+    winners_stmt = select(Candidate).where(Candidate.constituency_id.in_(latest_ids), Candidate.rank == 1)
+    winners = session.exec(winners_stmt).all()
+    winners_map = {w.constituency_id: w for w in winners}
+    
+    data = []
+    for norm_name, const in unique_const_latest.items():
+        winner = winners_map.get(const.id)
         
-        if norm_name not in unique_consts:
-            # Get winner for this latest record
-            cand_stmt = select(Candidate).where(Candidate.constituency_id == const.id).order_by(Candidate.votes.desc()).limit(1)
-            winner = session.exec(cand_stmt).first()
+        district = "Kannur" if norm_name == "DHARMADAM" else ("Kottayam" if norm_name == "PUTHUPPALLY" or norm_name == "POONJAR" else "Kerala")
+        
+        data.append({
+            "name": norm_name.title(),
+            "district": district,
+            "latest_year": const.election_year,
+            "winner": winner.name if winner else "N/A",
+            "party": winner.party if winner else "N/A",
+            "alliance": get_alliance(winner.party, const.election_year, winner.name, norm_name) if winner else "N/A"
+        })
             
-            district = "Kannur" if norm_name == "DHARMADAM" else ("Kottayam" if norm_name == "PUTHUPPALLY" or norm_name == "POONJAR" else "Kerala")
-            
-            unique_consts[norm_name] = {
-                "name": norm_name.title(), # Display in Title Case for better UX
-                "district": district,
-                "latest_year": const.election_year,
-                "winner": winner.name if winner else "N/A",
-                "party": winner.party if winner else "N/A",
-                "alliance": get_alliance(winner.party, const.election_year, winner.name, norm_name) if winner else "N/A"
-            }
-            
-    return {"data": sorted(list(unique_consts.values()), key=lambda x: x["name"])}
+    return {"data": sorted(data, key=lambda x: x["name"])}
 
 @router.get("/constituencies/search")
 def search_constituencies(q: str, session: Session = Depends(get_session)):
@@ -84,24 +104,37 @@ def search_constituencies(q: str, session: Session = Depends(get_session)):
 @router.get("/constituencies/{name}/dashboard")
 def get_constituency_dashboard(name: str, session: Session = Depends(get_session)):
     # 1. Fetch all records for this constituency name (case-insensitive)
-    statement = select(Constituency).where(Constituency.constituency_name.ilike(name)).order_by(Constituency.election_year.desc())
-    history_records = session.exec(statement).all()
+    history_records = session.exec(
+        select(Constituency)
+        .where(Constituency.constituency_name.ilike(name))
+        .order_by(Constituency.election_year.desc())
+    ).all()
     
     if not history_records:
         raise HTTPException(status_code=404, detail="Constituency not found")
     
-    # 2. Build detailed history and timeline
+    # 2. Batch fetch ALL candidates for these history records in one go
+    const_ids = [c.id for c in history_records]
+    all_candidates = session.exec(
+        select(Candidate)
+        .where(Candidate.constituency_id.in_(const_ids))
+        .order_by(Candidate.votes.desc())
+    ).all()
+    
+    # Group in memory
+    candidates_by_const = {}
+    for cand in all_candidates:
+        if cand.constituency_id not in candidates_by_const:
+            candidates_by_const[cand.constituency_id] = []
+        candidates_by_const[cand.constituency_id].append(cand)
+
+    # 3. Build detailed history and timeline
     election_history = []
     alliance_timeline = []
     margin_trend = []
     
-    total_wins = 0
-    total_margin_perc = 0
-    
     for const in history_records:
-        candidates_stmt = select(Candidate).where(Candidate.constituency_id == const.id).order_by(Candidate.votes.desc())
-        candidates = session.exec(candidates_stmt).all()
-        
+        candidates = candidates_by_const.get(const.id, [])
         if not candidates: continue
         
         winner = candidates[0]
@@ -123,22 +156,14 @@ def get_constituency_dashboard(name: str, session: Session = Depends(get_session
             "margin_perc": round(margin_perc, 2)
         })
         
-        alliance_timeline.append({
-            "year": const.election_year,
-            "alliance": alliance
-        })
-        
-        margin_trend.append({
-            "year": const.election_year,
-            "margin": margin,
-            "margin_perc": round(margin_perc, 2)
-        })
+        alliance_timeline.append({"year": const.election_year, "alliance": alliance})
+        margin_trend.append({"year": const.election_year, "margin": margin, "margin_perc": round(margin_perc, 2)})
 
     # Summary and Stats
     latest = history_records[0]
-    district = "Kannur" if latest.constituency_name == "Dharmadam" else ("Kottayam" if latest.constituency_name == "Puthuppally" else "Kerala")
+    district = "Kannur" if latest.constituency_name.upper() == "DHARMADAM" else ("Kottayam" if latest.constituency_name.upper() in ["PUTHUPPALLY", "POONJAR"] else "Kerala")
     
-    # Heuristic for Swing Propensity (Standard Deviation of margin percentage)
+    variance = 0
     if len(margin_trend) > 1:
         avg_margin = sum(m["margin_perc"] for m in margin_trend) / len(margin_trend)
         variance = sum((m["margin_perc"] - avg_margin)**2 for m in margin_trend) / len(margin_trend)
@@ -146,9 +171,10 @@ def get_constituency_dashboard(name: str, session: Session = Depends(get_session
     else:
         swing_propensity = "Low"
 
-    # Fallback for Electorate if missing (estimate based on votes polled and typical 75% turnout)
-    votes_polled = latest.votes_polled or sum(c.votes for c in session.exec(select(Candidate).where(Candidate.constituency_id == latest.id)).all())
-    electorate = latest.electorate or int(votes_polled / 0.76) # 76% is a very common turnout in Kerala
+    # Turnout stats from latest record
+    latest_cands = candidates_by_const.get(latest.id, [])
+    votes_polled = latest.votes_polled or sum(c.votes for c in latest_cands)
+    electorate = latest.electorate or int(votes_polled / 0.76)
     turnout_perc = (votes_polled / electorate * 100) if electorate > 0 else 0
 
     return {
@@ -166,7 +192,7 @@ def get_constituency_dashboard(name: str, session: Session = Depends(get_session
             "stats": {
                 "dominant_group": "Agrarian Workers" if district == "Kannur" else "Service Sector",
                 "assemblies": len(history_records),
-                "swing_propensity": f"{swing_propensity} ({round(variance, 1) if 'variance' in locals() else 0}%)"
+                "swing_propensity": f"{swing_propensity} ({round(variance, 1)}%)"
             }
         }
     }
