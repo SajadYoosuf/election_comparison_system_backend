@@ -1,7 +1,10 @@
 # pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, HTTPException
 # pyrefly: ignore [missing-import]
+# pyrefly: ignore [missing-import]
 from sqlmodel import Session, select, func
+# pyrefly: ignore [missing-import]
+from sqlalchemy.orm import aliased
 from core.database import get_session
 from core.models import Election, Constituency, Candidate
 from core.logic import get_alliance
@@ -14,6 +17,7 @@ def get_year_metrics(year: int, session: Session):
     election = session.exec(select(Election).where(Election.year == year)).first()
     if not election: return None
         
+    # 1. Base constituency data
     consts = session.exec(select(Constituency).where(Constituency.election_year == year)).all()
     const_ids = [c.id for c in consts]
     
@@ -26,43 +30,56 @@ def get_year_metrics(year: int, session: Session):
     
     if total_electorate == 0: total_electorate = int(total_votes_polled / 0.75)
 
-    # 1. Alliance & Seats
-    winners = session.exec(select(Candidate, Constituency.constituency_name).join(Constituency).where(Constituency.election_year == year, Candidate.rank == 1)).all()
+    # 2. Alliance, Seats & Margins (Optimized with one query)
+    # We fetch winners and their respective runner-ups in one join
+    Winner = aliased(Candidate)
+    RunnerUp = aliased(Candidate)
+    
+    margins_stmt = (
+        select(Winner, RunnerUp.votes.label("runner_votes"), Constituency.constituency_name)
+        .join(Constituency, Winner.constituency_id == Constituency.id)
+        .outerjoin(RunnerUp, (RunnerUp.constituency_id == Constituency.id) & (RunnerUp.rank == 2))
+        .where(Constituency.election_year == year, Winner.rank == 1)
+    )
+    
+    results = session.exec(margins_stmt).all()
+    
     ldf_seats, udf_seats, nda_seats, ind_seats = 0, 0, 0, 0
     total_margin = 0
+    women_elected = 0
     
-    for cand, cname in winners:
-        alliance = get_alliance(cand.party, year, cand.name, cname)
+    for winner, runner_votes, cname in results:
+        alliance = get_alliance(winner.party, year, winner.name, cname)
         if alliance == "LDF": ldf_seats += 1
         elif alliance == "UDF": udf_seats += 1
         elif alliance == "NDA": nda_seats += 1
         
-        if cand.party.upper() == "IND": ind_seats += 1
+        if winner.party.upper() == "IND": ind_seats += 1
+        if winner.sex == 'F': women_elected += 1
         
-        # Victory Margin
-        runner_up = session.exec(select(Candidate).where(Candidate.constituency_id == cand.constituency_id, Candidate.rank == 2)).first()
-        if runner_up:
-            total_margin += (cand.votes - runner_up.votes)
+        if runner_votes:
+            total_margin += (winner.votes - runner_votes)
 
-    avg_margin = total_margin / len(winners) if winners else 0
+    avg_margin = total_margin / len(results) if results else 0
 
-    # 2. Gender
+    # 3. Candidate Stats
     total_cands = session.exec(select(func.count(Candidate.id)).where(Candidate.constituency_id.in_(const_ids))).one()
     women_cands = session.exec(select(func.count(Candidate.id)).where(Candidate.constituency_id.in_(const_ids), Candidate.sex == 'F')).one()
-    women_elected = len([w for w, cn in winners if w.sex == 'F'])
 
-    # 3. NOTA & Deposits
+    # 4. NOTA & Deposits (Optimized)
     total_nota = sum(c.nota_votes or 0 for c in consts)
     
-    # Deposit forfeited algorithm: candidates with < 1/6 of total valid votes in their seat
-    # For performance, we fetch candidate counts per seat and check their vote share
-    # This is a bit heavy, so we'll approximate or run a focused query
-    all_cands = session.exec(select(Candidate, Constituency.votes_polled).join(Constituency).where(Constituency.election_year == year)).all()
-    forfeited = 0
-    for cand, vp in all_cands:
-        votes_needed = (vp or cand.votes * 1.3) / 6 # Heuristic if vp missing
-        if cand.votes < votes_needed:
-            forfeited += 1
+    # Deposit forfeited: votes < 1/6 of total valid votes
+    # Use SQL for this check
+    forfeited_stmt = (
+        select(func.count(Candidate.id))
+        .join(Constituency, Candidate.constituency_id == Constituency.id)
+        .where(
+            Constituency.election_year == year,
+            Candidate.votes < (func.coalesce(Constituency.votes_polled, Candidate.votes * 1.3) / 6)
+        )
+    )
+    forfeited = session.exec(forfeited_stmt).one()
 
     return {
         "year": year,
@@ -80,6 +97,7 @@ def get_year_metrics(year: int, session: Session):
         "nota_total": total_nota,
         "forfeited": forfeited
     }
+
 
 @router.get("/years")
 def compare_years(y1: int, y2: int, session: Session = Depends(get_session)):

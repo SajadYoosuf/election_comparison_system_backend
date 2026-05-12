@@ -1,4 +1,6 @@
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends
+# pyrefly: ignore [missing-import]
 from sqlmodel import Session, select, func
 from core.database import get_session
 from core.models import Candidate, Constituency, Election
@@ -29,31 +31,30 @@ def get_parties_summary(session: Session = Depends(get_session)):
     current_year = years[0]
     prev_year = years[1] if len(years) > 1 else None
     
+    # Bulk fetch current seats
+    curr_stmt = select(Candidate.party, func.count(Candidate.id)).join(Constituency).where(Candidate.rank == 1, Constituency.election_year == current_year).group_by(Candidate.party)
+    raw_curr = {p: c for p, c in session.exec(curr_stmt).all()}
+    
+    # Bulk fetch previous seats
+    raw_prev = {}
+    if prev_year:
+        prev_stmt = select(Candidate.party, func.count(Candidate.id)).join(Constituency).where(Candidate.rank == 1, Constituency.election_year == prev_year).group_by(Candidate.party)
+        raw_prev = {p: c for p, c in session.exec(prev_stmt).all()}
+
+    def get_count(party_name, lookup):
+        variants = get_party_variants(party_name)
+        return sum(lookup.get(v, 0) for v in variants)
+
     results = []
     for p_name in major_parties:
-        variants = get_party_variants(p_name)
+        current_seats = get_count(p_name, raw_curr)
+        prev_seats = get_count(p_name, raw_prev)
         
-        # Current seats
-        current_seats = session.exec(
-            select(func.count(Candidate.id))
-            .join(Constituency, Candidate.constituency_id == Constituency.id)
-            .where(Candidate.party.in_(variants), Candidate.rank == 1, Constituency.election_year == current_year)
-        ).one()
-        
-        # Previous seats for trend
-        prev_seats = 0
-        if prev_year:
-            prev_seats = session.exec(
-                select(func.count(Candidate.id))
-                .join(Constituency, Candidate.constituency_id == Constituency.id)
-                .where(Candidate.party.in_(variants), Candidate.rank == 1, Constituency.election_year == prev_year)
-            ).one()
-            
         trend = 0
         if prev_seats > 0:
             trend = ((current_seats - prev_seats) / prev_seats) * 100
         elif current_seats > 0:
-            trend = 100.0 # From 0 to something
+            trend = 100.0
             
         results.append({
             "name": p_name,
@@ -64,6 +65,7 @@ def get_parties_summary(session: Session = Depends(get_session)):
         })
         
     return {"data": results}
+
 
 @router.get("/{party_name}/performance")
 def get_party_performance(party_name: str, session: Session = Depends(get_session)):
@@ -125,54 +127,74 @@ def get_party_performance(party_name: str, session: Session = Depends(get_sessio
 def get_party_strongholds(party_name: str, session: Session = Depends(get_session)):
     variants = get_party_variants(party_name)
     
-    # Find constituencies with most wins for this party
-    statement = (
-        select(Constituency.constituency_name, func.count(Candidate.id))
+    # 1. Find constituencies with most wins
+    stronghold_stmt = (
+        select(Constituency.constituency_name, func.count(Candidate.id).label("win_count"))
         .join(Candidate, Candidate.constituency_id == Constituency.id)
         .where(Candidate.party.in_(variants), Candidate.rank == 1)
         .group_by(Constituency.constituency_name)
         .order_by(func.count(Candidate.id).desc())
         .limit(6)
     )
-    strongholds = session.exec(statement).all()
+    stronghold_data = session.exec(stronghold_stmt).all()
+    if not stronghold_data: return {"data": []}
     
-    results = []
-    for name, win_count in strongholds:
-        # Get latest margin in 2026
-        latest_year = 2026
-        
-        # Get top 2 candidates to calculate margin
-        margin_stmt = (
-            select(Candidate.votes, Candidate.party)
-            .join(Constituency, Candidate.constituency_id == Constituency.id)
-            .where(Constituency.constituency_name == name, Constituency.election_year == latest_year)
-            .order_by(Candidate.votes.desc())
-            .limit(2)
+    stronghold_names = [row[0] for row in stronghold_data]
+    recent_years = [2026, 2021, 2016, 2011]
+    
+    # 2. Batch fetch all winners for these constituencies across recent years
+    streak_stmt = (
+        select(Constituency.constituency_name, Constituency.election_year, Candidate.party)
+        .join(Candidate, Candidate.constituency_id == Constituency.id)
+        .where(
+            Constituency.constituency_name.in_(stronghold_names),
+            Constituency.election_year.in_(recent_years),
+            Candidate.rank == 1
         )
-        candidates = session.exec(margin_stmt).all()
-        
-        margin = 0
-        if len(candidates) >= 2:
-            # Check if our party won, then calc margin
-            if candidates[0].party in variants:
-                margin = (candidates[0].votes or 0) - (candidates[1].votes or 0)
-        elif len(candidates) == 1 and candidates[0].party in variants:
-            margin = candidates[0].votes or 0
-        
-        # Simple streak calculation (last 4 elections)
-        recent_years = [2026, 2021, 2016, 2011]
+    )
+    streak_results = session.exec(streak_stmt).all()
+    streak_map = {} # (const_name, year) -> party
+    for name, year, party in streak_results:
+        streak_map[(name, year)] = party
+
+    # 3. Batch fetch latest margins (2026)
+    margin_stmt = (
+        select(Constituency.constituency_name, Candidate.votes, Candidate.party, Candidate.rank)
+        .join(Candidate, Candidate.constituency_id == Constituency.id)
+        .where(
+            Constituency.constituency_name.in_(stronghold_names),
+            Constituency.election_year == 2026,
+            Candidate.rank.in_([1, 2])
+        )
+        .order_by(Constituency.constituency_name, Candidate.rank)
+    )
+    margin_results = session.exec(margin_stmt).all()
+    margin_map = {} # const_name -> (winner_votes, runner_votes, winner_party)
+    for name, votes, party, rank in margin_results:
+        if name not in margin_map: margin_map[name] = [0, 0, ""]
+        if rank == 1:
+            margin_map[name][0] = votes or 0
+            margin_map[name][2] = party
+        else:
+            margin_map[name][1] = votes or 0
+
+    results = []
+    for name, win_count in stronghold_data:
+        # Calculate streak
         streak = []
         for y in recent_years:
-            won = session.exec(
-                select(Candidate.id)
-                .join(Constituency, Candidate.constituency_id == Constituency.id)
-                .where(Constituency.constituency_name == name, Candidate.party.in_(variants), Candidate.rank == 1, Constituency.election_year == y)
-            ).first()
-            streak.append(True if won else False)
+            winner_party = streak_map.get((name, y))
+            streak.append(winner_party in variants if winner_party else False)
+            
+        # Calculate margin
+        m_info = margin_map.get(name, [0, 0, ""])
+        margin = 0
+        if m_info[2] in variants:
+            margin = m_info[0] - m_info[1]
         
         results.append({
             "constituency": name,
-            "district": "Kottayam" if name == "Puthuppally" else ("Kannur" if name == "Dharmadam" else "Various"),
+            "district": "Kottayam" if name == "PUTHUPPALLY" else ("Kannur" if name == "DHARMADAM" else "Various"),
             "win_count": f"{win_count}",
             "win_ratio": f"{win_count}/14",
             "streak": streak,
@@ -180,3 +202,4 @@ def get_party_strongholds(party_name: str, session: Session = Depends(get_sessio
         })
         
     return {"data": results}
+
